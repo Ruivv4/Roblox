@@ -76,6 +76,7 @@ local statusText = "Idle"
 local voteStatus = "Idle"
 local invincibilityStatus = "Unknown"
 local selectedWeaponSlot = "None"
+local queueLockActive = false
 local voteConnections = {}
 local duelVoteConnections = {}
 local currentTargetPart = nil
@@ -360,9 +361,13 @@ local function hookDuelSubject(duelSubject)
 
         if status then
             statusText = "Match: " .. tostring(status)
+            if tostring(status) ~= "GameOver" then
+                queueLockActive = true
+            end
         end
 
         if hasVoteOptions then
+            queueLockActive = true
             voteArena(reason or "VoteOptions")
         else
             voteStatus = status and ("Match: " .. tostring(status)) or "Match detected"
@@ -569,6 +574,7 @@ local function moveToSelectedQueue()
                 lastBlocker = blocker
             else
                 if oppositeOccupant and isExpectedPartner(oppositeOccupant) then
+                    queueLockActive = true
                     statusText = "Partner on " .. padName
                     updateTracker()
                 end
@@ -606,7 +612,9 @@ local function startPadMonitor()
 
     task.spawn(function()
         while startEnabled and thisToken == monitorToken do
-            if not currentTargetPart or not currentPadName or not currentTeamName then
+            if queueLockActive then
+                updateTracker()
+            elseif not currentTargetPart or not currentPadName or not currentTeamName then
                 moveToSelectedQueue()
             else
                 local oppositePart = getTeamPart(currentPadName, getOppositeTeamName(currentTeamName))
@@ -641,12 +649,14 @@ local function setRole(role, enabled)
         currentTargetPart = nil
         currentPadName = nil
         currentTeamName = nil
+        queueLockActive = false
         statusText = startEnabled and "Waiting to start" or (role .. " selected")
     elseif selectedRole == role then
         selectedRole = "None"
         currentTargetPart = nil
         currentPadName = nil
         currentTeamName = nil
+        queueLockActive = false
         statusText = startEnabled and "Pick Main or Alt" or "Idle"
     end
     updateTracker()
@@ -725,6 +735,7 @@ do
                 currentTargetPart = nil
                 currentPadName = nil
                 currentTeamName = nil
+                queueLockActive = false
 
                 if state then
                     statusText = "Waiting to start"
