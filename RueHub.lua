@@ -15,7 +15,7 @@ local library, pointers = loadstring(game:HttpGet(LIBRARY_URL))()
 
 local rueConfig = getgenv().RueHubConfig or {}
 getgenv().MainAccountsList = rueConfig.MainAccountsList or getgenv().MainAccountsList or {"awsomedue1234"}
-getgenv().AltAccountsList = rueConfig.AltAccountsList or getgenv().AltAccountsList or {"Eiraleelin"}
+getgenv().AltAccountsList = rueConfig.AltAccountsList or getgenv().AltAccountsList or {"Eiraleelin", "Eirlileen", "eirlileen"}
 
 local function getExecutorName()
     local checks = {
@@ -55,11 +55,9 @@ local function getDeviceToken()
     local ok, clientId = pcall(function()
         return RbxAnalyticsService:GetClientId()
     end)
-
     if ok and clientId and clientId ~= "" then
         return tostring(clientId)
     end
-
     return getExecutorName() .. "|" .. tostring(UserInputService:GetPlatform())
 end
 
@@ -77,6 +75,7 @@ local voteStatus = "Idle"
 local invincibilityStatus = "Unknown"
 local selectedWeaponSlot = "None"
 local queueLockActive = false
+local pairingRound = tonumber(rueConfig.PairingRound or getgenv().RueHubPairingRound) or 0
 local voteConnections = {}
 local duelVoteConnections = {}
 local currentTargetPart = nil
@@ -87,15 +86,8 @@ local monitorToken = 0
 local failPosition = Vector3.new(212, -682, 1184)
 local tweenToMainDuration = 3
 
-local ROLE_TO_TEAM = {
-    Main = "Team1",
-    Alt = "Team2",
-}
-
-local QUEUE_PAD_NAMES = {
-    "Queue Pad #1",
-    "Queue Pad #2",
-}
+local ROLE_TO_TEAM = {Main = "Team1", Alt = "Team2"}
+local QUEUE_PAD_NAMES = {"Queue Pad #1", "Queue Pad #2"}
 
 local window = library:New({
     name = "Rue Hub",
@@ -105,7 +97,7 @@ local window = library:New({
 
 local function notify(text)
     if window and window.notificationlist then
-        window.notificationlist:AddNotification({text = text})
+        window.notificationlist:AddNotification({text = tostring(text)})
     else
         warn("[Rue Hub] " .. tostring(text))
     end
@@ -113,17 +105,15 @@ end
 
 local function setTextbox(pointer, text)
     local object = pointers and pointers[pointer]
-    if not object then
-        return
-    end
-
+    if not object then return end
+    local value = tostring(text)
     pcall(function()
         if object.Update then
-            object:Update("Text", tostring(text))
+            object:Update("Text", value)
         elseif object.Set then
-            object:Set(tostring(text))
+            object:Set(value)
         elseif object.set then
-            object:set(tostring(text))
+            object:set(value)
         end
     end)
 end
@@ -141,19 +131,17 @@ local function getTextbox(pointer, fallback)
     return fallback or ""
 end
 
-local function setToggle(pointer, state)
+local function setControlVisible(pointer, state)
     local object = pointers and pointers[pointer]
-    if not object then
-        return
-    end
-
+    if not object then return end
     pcall(function()
-        if object.Update then
-            object:Update("Value", state)
-        elseif object.Set then
-            object:Set(state)
-        elseif object.set then
-            object:set(state)
+        if object.Update then object:Update("Visible", state) end
+        if object.Frame then
+            object.Frame.Visible = state
+        elseif object.frame then
+            object.frame.Visible = state
+        elseif object.Instance then
+            object.Instance.Visible = state
         end
     end)
 end
@@ -167,85 +155,122 @@ local function updateTracker()
     setTextbox("rue/tracker/weapon_slot", selectedWeaponSlot)
 end
 
-local function listHasAccount(list, player)
+local function getAccountIndex(list, player)
     local playerName = string.lower(player.Name)
     local displayName = string.lower(player.DisplayName or "")
-
-    for _, account in ipairs(list or {}) do
+    for index, account in ipairs(list or {}) do
         local value = string.lower(tostring(account))
         if value == playerName or value == displayName or tonumber(value) == player.UserId then
-            return true
+            return index
         end
     end
+    return nil
+end
 
-    return false
+local function listHasAccount(list, player)
+    return getAccountIndex(list, player) ~= nil
 end
 
 local function getAccountRole(player)
-    if listHasAccount(getgenv().MainAccountsList, player) then
-        return "Main"
-    end
-    if listHasAccount(getgenv().AltAccountsList, player) then
-        return "Alt"
-    end
+    if listHasAccount(getgenv().MainAccountsList, player) then return "Main" end
+    if listHasAccount(getgenv().AltAccountsList, player) then return "Alt" end
     return nil
 end
 
 local function getExpectedPartnerRole()
-    if selectedRole == "Main" then
-        return "Alt"
-    elseif selectedRole == "Alt" then
-        return "Main"
-    end
+    if selectedRole == "Main" then return "Alt" end
+    if selectedRole == "Alt" then return "Main" end
     return nil
+end
+
+local function getListedPlayers(role)
+    local list = role == "Main" and getgenv().MainAccountsList or getgenv().AltAccountsList
+    local players = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        local index = getAccountIndex(list, player)
+        if index then
+            table.insert(players, {Player = player, Index = index})
+        end
+    end
+    table.sort(players, function(left, right)
+        if left.Index == right.Index then
+            return left.Player.Name < right.Player.Name
+        end
+        return left.Index < right.Index
+    end)
+    local ordered = {}
+    for _, item in ipairs(players) do
+        table.insert(ordered, item.Player)
+    end
+    return ordered
+end
+
+local function getAssignedPairForSlot(slot, mainCount, altCount)
+    if mainCount <= 0 or altCount <= 0 then return nil, nil end
+    if mainCount <= altCount then
+        return slot, ((slot + pairingRound - 1) % altCount) + 1
+    end
+    return ((slot + pairingRound - 1) % mainCount) + 1, slot
+end
+
+local function getAssignedPartner()
+    local localPlayer = Players.LocalPlayer
+    local mains = getListedPlayers("Main")
+    local alts = getListedPlayers("Alt")
+    local pairCount = math.min(#mains, #alts)
+
+    if not localPlayer or selectedRole == "None" then
+        return nil, "Pick Main or Alt"
+    end
+    if pairCount <= 0 then
+        return nil, "No listed partner in server"
+    end
+
+    for slot = 1, pairCount do
+        local mainIndex, altIndex = getAssignedPairForSlot(slot, #mains, #alts)
+        local mainPlayer = mains[mainIndex]
+        local altPlayer = alts[altIndex]
+        if selectedRole == "Main" and mainPlayer == localPlayer then
+            return altPlayer, altPlayer and ("Assigned Alt: " .. altPlayer.Name) or "Assigned Alt missing"
+        elseif selectedRole == "Alt" and altPlayer == localPlayer then
+            return mainPlayer, mainPlayer and ("Assigned Main: " .. mainPlayer.Name) or "Assigned Main missing"
+        end
+    end
+
+    return nil, "Waiting turn | Round " .. tostring(pairingRound)
 end
 
 local function isExpectedPartner(player)
-    local expectedRole = getExpectedPartnerRole()
-    return expectedRole ~= nil and getAccountRole(player) == expectedRole
+    local assignedPartner = getAssignedPartner()
+    return assignedPartner ~= nil and player == assignedPartner
 end
 
 local function getPlayerByAccountRole(role)
-    local localPlayer = Players.LocalPlayer
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= localPlayer and getAccountRole(player) == role then
-            return player
-        end
+    local assignedPartner = getAssignedPartner()
+    if assignedPartner and getAccountRole(assignedPartner) == role then
+        return assignedPartner
     end
     return nil
 end
 
-local tweenAltToMain
-
 local function validatePort(value)
     local port = tonumber(value)
-    if not port then
-        return false, "Invalid Port"
-    end
-
+    if not port then return false, "Invalid Port" end
     port = math.floor(port)
-    if port < PORT_MIN or port > PORT_MIN + PORT_RANGE - 1 then
-        return false, "Invalid Port"
-    end
-
-    if port == ruePort then
-        return false, "Self Port"
-    end
-
+    if port < PORT_MIN or port > PORT_MIN + PORT_RANGE - 1 then return false, "Invalid Port" end
+    if port == ruePort then return false, "Self Port" end
     return true, tostring(port)
 end
 
 local function connectPort()
     local typed = getTextbox("rue/info/connect_port", connectedPort)
     local ok, result = validatePort(typed)
-
     if ok then
         connectedPort = result
         statusText = "Connected Port"
     else
         statusText = result
     end
-
     updateTracker()
     notify(statusText)
 end
@@ -254,13 +279,11 @@ local function voteArena(reason)
     local voteRemote = ReplicatedStorage:FindFirstChild("Remotes")
         and ReplicatedStorage.Remotes:FindFirstChild("Duels")
         and ReplicatedStorage.Remotes.Duels:FindFirstChild("Vote")
-
     if not voteRemote then
         voteStatus = "Vote remote missing"
         updateTracker()
         return false
     end
-
     voteRemote:FireServer("Arena")
     voteStatus = reason and ("Voted Arena: " .. reason) or "Voted Arena"
     updateTracker()
@@ -270,9 +293,7 @@ end
 
 local function disconnectConnections(connections)
     for _, connection in ipairs(connections) do
-        pcall(function()
-            connection:Disconnect()
-        end)
+        pcall(function() connection:Disconnect() end)
     end
     table.clear(connections)
 end
@@ -291,13 +312,12 @@ local function getSpectateController()
     local playerScripts = localPlayer and localPlayer:FindFirstChild("PlayerScripts")
     local controllers = playerScripts and playerScripts:FindFirstChild("Controllers")
     local module = controllers and controllers:FindFirstChild("SpectateController")
-    if not module then
-        return nil
-    end
-
+    if not module then return nil end
     local ok, controller = pcall(require, module)
     return ok and controller or nil
 end
+
+local tweenAltToMain
 
 local function hookInvincibility(duelSubject)
     local localDueler = duelSubject and duelSubject.LocalDueler
@@ -309,7 +329,6 @@ local function hookInvincibility(duelSubject)
         local ok, value = pcall(function()
             return entity and entity:Get("IsInvincible")
         end)
-
         if ok and value ~= nil then
             invincibilityStatus = value and "Yes" or "No"
             if lastInvincible == true and value == false then
@@ -319,14 +338,12 @@ local function hookInvincibility(duelSubject)
         else
             invincibilityStatus = "Unavailable"
         end
-
         updateTracker()
     end
 
     if clientFighter and clientFighter.InvincibilityChanged then
         table.insert(duelVoteConnections, clientFighter.InvincibilityChanged:Connect(updateInvincibility))
     end
-
     if entity then
         local okSignal, signal = pcall(function()
             return entity:GetDataChangedSignal("IsInvincible")
@@ -335,13 +352,11 @@ local function hookInvincibility(duelSubject)
             table.insert(duelVoteConnections, signal:Connect(updateInvincibility))
         end
     end
-
     updateInvincibility()
 end
 
 local function hookDuelSubject(duelSubject)
     clearDuelVoteConnections()
-
     if not duelSubject then
         voteStatus = startEnabled and "Waiting for match" or "Idle"
         updateTracker()
@@ -353,19 +368,16 @@ local function hookDuelSubject(duelSubject)
     local function updateDuelStatus(reason)
         local status = nil
         local hasVoteOptions = nil
-
         pcall(function()
             status = duelSubject:Get("Status")
             hasVoteOptions = duelSubject:Get("VoteOptions") ~= nil
         end)
-
         if status then
             statusText = "Match: " .. tostring(status)
             if tostring(status) ~= "GameOver" then
                 queueLockActive = true
             end
         end
-
         if hasVoteOptions then
             queueLockActive = true
             voteArena(reason or "VoteOptions")
@@ -379,20 +391,14 @@ local function hookDuelSubject(duelSubject)
         return duelSubject:GetDataChangedSignal("Status")
     end)
     if okStatus and statusSignal then
-        table.insert(duelVoteConnections, statusSignal:Connect(function()
-            updateDuelStatus("Status")
-        end))
+        table.insert(duelVoteConnections, statusSignal:Connect(function() updateDuelStatus("Status") end))
     end
-
     local okVote, voteSignal = pcall(function()
         return duelSubject:GetDataChangedSignal("VoteOptions")
     end)
     if okVote and voteSignal then
-        table.insert(duelVoteConnections, voteSignal:Connect(function()
-            updateDuelStatus("VoteOptions")
-        end))
+        table.insert(duelVoteConnections, voteSignal:Connect(function() updateDuelStatus("VoteOptions") end))
     end
-
     updateDuelStatus("Match")
 end
 
@@ -403,56 +409,40 @@ local function startMatchDetector()
         updateTracker()
         return false
     end
-
     if controller.DuelSubjectChanged then
         table.insert(voteConnections, controller.DuelSubjectChanged:Connect(function()
             hookDuelSubject(controller.CurrentDuelSubject)
         end))
     end
-
     hookDuelSubject(controller.CurrentDuelSubject)
     return true
 end
 
 local function getLocalCharacterRoot()
     local player = Players.LocalPlayer
-    if not player then
-        return nil
-    end
-
+    if not player then return nil end
     local character = player.Character or player.CharacterAdded:Wait()
     return character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
 end
 
 tweenAltToMain = function()
-    if selectedRole ~= "Alt" or not startEnabled then
-        return false
-    end
-
+    if selectedRole ~= "Alt" or not startEnabled then return false end
     local mainPlayer = getPlayerByAccountRole("Main")
     local mainCharacter = mainPlayer and mainPlayer.Character
     local mainRoot = mainCharacter and mainCharacter:FindFirstChild("HumanoidRootPart")
     local altRoot = getLocalCharacterRoot()
-
     if not mainRoot or not altRoot then
         statusText = "Main target missing"
         updateTracker()
         notify(statusText)
         return false
     end
-
-    if activeMainTween then
-        pcall(function()
-            activeMainTween:Cancel()
-        end)
-    end
-
+    if activeMainTween then pcall(function() activeMainTween:Cancel() end) end
     activeMainTween = TweenService:Create(
         altRoot,
         TweenInfo.new(tweenToMainDuration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
         {CFrame = mainRoot.CFrame * CFrame.new(0, 0, 4)}
     )
-
     statusText = "Alt tweening to Main"
     updateTracker()
     notify(statusText)
@@ -506,14 +496,24 @@ local function getOccupyingPlayer(part)
     return nil
 end
 
-local function hasPartnerInServer()
+local function getDetectedPlayersText()
+    local rows = {}
     local localPlayer = Players.LocalPlayer
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= localPlayer and isExpectedPartner(player) then
-            return true, player
-        end
+        local role = getAccountRole(player) or "Unlisted"
+        local label = player.Name .. ":" .. role
+        if player == localPlayer then label ..= "(You)" end
+        table.insert(rows, label)
     end
-    return false, nil
+    return #rows > 0 and table.concat(rows, ", ") or "none"
+end
+
+local function hasPartnerInServer()
+    local partner, reason = getAssignedPartner()
+    if partner and partner ~= Players.LocalPlayer then
+        return true, partner
+    end
+    return false, reason
 end
 
 local function stepAwayFromPart()
@@ -548,16 +548,16 @@ local function moveToSelectedQueue()
         return false
     end
 
-    local hasPartner = hasPartnerInServer()
+    local hasPartner, partnerOrReason = hasPartnerInServer()
     if not hasPartner then
-        statusText = "Waiting for other account"
+        local expectedRole = getExpectedPartnerRole() or "partner"
+        statusText = "Waiting for " .. expectedRole .. " | " .. tostring(partnerOrReason or "No assigned partner") .. " | Seen: " .. getDetectedPlayersText()
         updateTracker()
         return false
     end
 
     local foundPad = false
     local lastBlocker = nil
-
     for _, padName in ipairs(QUEUE_PAD_NAMES) do
         local targetPart, oppositePart = getPadParts(padName, teamName)
         if targetPart and oppositePart then
@@ -565,11 +565,9 @@ local function moveToSelectedQueue()
             local targetOccupant = getOccupyingPlayer(targetPart)
             local oppositeOccupant = getOccupyingPlayer(oppositePart)
             local blocker = targetOccupant
-
             if oppositeOccupant and not isExpectedPartner(oppositeOccupant) then
                 blocker = oppositeOccupant
             end
-
             if blocker then
                 lastBlocker = blocker
             else
@@ -578,7 +576,6 @@ local function moveToSelectedQueue()
                     statusText = "Partner on " .. padName
                     updateTracker()
                 end
-
                 if teleportToPart(targetPart) then
                     currentTargetPart = targetPart
                     currentPadName = padName
@@ -587,9 +584,7 @@ local function moveToSelectedQueue()
                     updateTracker()
                     notify(statusText)
                     task.delay(1, function()
-                        if startEnabled then
-                            voteArena("Queued")
-                        end
+                        if startEnabled then voteArena("Queued") end
                     end)
                     return true
                 end
@@ -609,7 +604,6 @@ end
 local function startPadMonitor()
     monitorToken += 1
     local thisToken = monitorToken
-
     task.spawn(function()
         while startEnabled and thisToken == monitorToken do
             if queueLockActive then
@@ -621,11 +615,9 @@ local function startPadMonitor()
                 local targetOccupant = getOccupyingPlayer(currentTargetPart)
                 local oppositeOccupant = oppositePart and getOccupyingPlayer(oppositePart)
                 local blocker = targetOccupant
-
                 if oppositeOccupant and not isExpectedPartner(oppositeOccupant) then
                     blocker = oppositeOccupant
                 end
-
                 if blocker then
                     statusText = "Blocked: " .. blocker.Name
                     stepAwayFromPart()
@@ -643,6 +635,8 @@ local function startPadMonitor()
     end)
 end
 
+local updateWeaponSlotVisibility
+
 local function setRole(role, enabled)
     if enabled then
         selectedRole = role
@@ -659,30 +653,31 @@ local function setRole(role, enabled)
         queueLockActive = false
         statusText = startEnabled and "Pick Main or Alt" or "Idle"
     end
+    updateWeaponSlotVisibility()
     updateTracker()
     notify(statusText)
 end
 
-local weaponSlotPointers = {
-    "rue/auto/slot1",
-    "rue/auto/slot2",
-    "rue/auto/slot3",
-    "rue/auto/slot4",
-}
-
-local function setWeaponSlot(slot, enabled)
-    local slotText = tostring(slot)
-    if enabled then
-        selectedWeaponSlot = slotText
-        for index, pointer in ipairs(weaponSlotPointers) do
-            if index ~= slot then
-                setToggle(pointer, false)
-            end
-        end
-        statusText = "Weapon slot " .. slotText .. " selected"
-    elseif selectedWeaponSlot == slotText then
+updateWeaponSlotVisibility = function()
+    local isMain = selectedRole == "Main"
+    setControlVisible("rue/auto/weapon_slot", isMain)
+    if not isMain and selectedWeaponSlot ~= "None" then
         selectedWeaponSlot = "None"
-        statusText = "Weapon slot cleared"
+        setTextbox("rue/tracker/weapon_slot", selectedWeaponSlot)
+    end
+end
+
+local function setWeaponSlot(slot)
+    local slotText = tostring(slot or "None")
+    if slotText ~= "1" and slotText ~= "2" and slotText ~= "3" and slotText ~= "4" then
+        slotText = "None"
+    end
+    if selectedRole ~= "Main" and slotText ~= "None" then
+        selectedWeaponSlot = "None"
+        statusText = "Weapon slot is Main only"
+    else
+        selectedWeaponSlot = slotText
+        statusText = slotText == "None" and "Weapon slot cleared" or ("Weapon slot " .. slotText .. " selected")
     end
     updateTracker()
     notify(statusText)
@@ -691,159 +686,97 @@ end
 local mainPage = window:Page({name = "Main", size = 80})
 do
     local infoSection = mainPage:Section({name = "Information", side = "Left"})
-    do
-        infoSection:Textbox({
-            pointer = "rue/info/port",
-            placeholder = "Port",
-            text = tostring(ruePort),
-            middle = true,
-            reset_on_focus = false,
-        })
-
-        infoSection:Button({
-            name = "Copy Port",
-            callback = function()
-                if setclipboard then
-                    setclipboard(tostring(ruePort))
-                end
-                notify("Port: " .. tostring(ruePort))
-            end,
-        })
-
-        infoSection:Textbox({
-            pointer = "rue/info/connect_port",
-            placeholder = "Connect Port",
-            text = "",
-            middle = true,
-            reset_on_focus = false,
-            callback = function(value)
-                connectedPort = tostring(value or "")
-            end,
-        })
-
-        infoSection:Button({name = "Connect Port", callback = connectPort})
-    end
+    infoSection:Textbox({pointer = "rue/info/port", placeholder = "Port", text = tostring(ruePort), middle = true, reset_on_focus = false})
+    infoSection:Button({name = "Copy Port", callback = function()
+        if setclipboard then setclipboard(tostring(ruePort)) end
+        notify("Port: " .. tostring(ruePort))
+    end})
+    infoSection:Textbox({pointer = "rue/info/connect_port", placeholder = "Connect Port", text = "", middle = true, reset_on_focus = false, callback = function(value)
+        connectedPort = tostring(value or "")
+    end})
+    infoSection:Button({name = "Connect Port", callback = connectPort})
 
     local autoSection = mainPage:Section({name = "AUTO", side = "Right"})
-    do
-        autoSection:Toggle({
-            pointer = "rue/auto/start",
-            name = "Start",
-            default = false,
-            callback = function(state)
-                startEnabled = state
-                currentTargetPart = nil
-                currentPadName = nil
-                currentTeamName = nil
-                queueLockActive = false
-
-                if state then
-                    statusText = "Waiting to start"
-                    voteStatus = "Waiting for match"
-                    updateTracker()
-                    startMatchDetector()
-                    startPadMonitor()
-                else
-                    monitorToken += 1
-                    clearVoteConnections()
-                    if activeMainTween then
-                        pcall(function()
-                            activeMainTween:Cancel()
-                        end)
-                    end
-                    statusText = "Stopped"
-                    voteStatus = "Idle"
-                    invincibilityStatus = "Unknown"
-                    updateTracker()
-                end
-
-                notify(statusText)
-            end,
-        })
-
-        autoSection:Toggle({pointer = "rue/auto/main", name = "Main", default = false, callback = function(state) setRole("Main", state) end})
-        autoSection:Toggle({pointer = "rue/auto/alt", name = "Alt", default = false, callback = function(state) setRole("Alt", state) end})
-        autoSection:Toggle({pointer = "rue/auto/slot1", name = "1", default = false, callback = function(state) setWeaponSlot(1, state) end})
-        autoSection:Toggle({pointer = "rue/auto/slot2", name = "2", default = false, callback = function(state) setWeaponSlot(2, state) end})
-        autoSection:Toggle({pointer = "rue/auto/slot3", name = "3", default = false, callback = function(state) setWeaponSlot(3, state) end})
-        autoSection:Toggle({pointer = "rue/auto/slot4", name = "4", default = false, callback = function(state) setWeaponSlot(4, state) end})
-
-        autoSection:Textbox({pointer = "rue/tracker/role", placeholder = "Role", text = selectedRole, middle = true, reset_on_focus = false})
-        autoSection:Textbox({pointer = "rue/tracker/connected_port", placeholder = "Connected Port", text = "None", middle = true, reset_on_focus = false})
-        autoSection:Textbox({pointer = "rue/tracker/status", placeholder = "Status", text = statusText, middle = true, reset_on_focus = false})
-        autoSection:Textbox({pointer = "rue/tracker/vote", placeholder = "Vote", text = voteStatus, middle = true, reset_on_focus = false})
-        autoSection:Textbox({pointer = "rue/tracker/invincible", placeholder = "Invincible", text = invincibilityStatus, middle = true, reset_on_focus = false})
-        autoSection:Textbox({pointer = "rue/tracker/weapon_slot", placeholder = "Weapon Slot", text = selectedWeaponSlot, middle = true, reset_on_focus = false})
-    end
+    autoSection:Toggle({pointer = "rue/auto/start", name = "Start", default = false, callback = function(state)
+        startEnabled = state
+        currentTargetPart = nil
+        currentPadName = nil
+        currentTeamName = nil
+        queueLockActive = false
+        if state then
+            statusText = "Waiting to start"
+            voteStatus = "Waiting for match"
+            updateTracker()
+            startMatchDetector()
+            startPadMonitor()
+        else
+            monitorToken += 1
+            clearVoteConnections()
+            if activeMainTween then pcall(function() activeMainTween:Cancel() end) end
+            statusText = "Stopped"
+            voteStatus = "Idle"
+            invincibilityStatus = "Unknown"
+            updateTracker()
+        end
+        notify(statusText)
+    end})
+    autoSection:Toggle({pointer = "rue/auto/main", name = "Main", default = false, callback = function(state) setRole("Main", state) end})
+    autoSection:Toggle({pointer = "rue/auto/alt", name = "Alt", default = false, callback = function(state) setRole("Alt", state) end})
+    autoSection:Dropdown({
+        pointer = "rue/auto/weapon_slot",
+        Pointer = "rue/auto/weapon_slot",
+        name = "Weapon Slot",
+        Name = "Weapon Slot",
+        options = {"None", "1", "2", "3", "4"},
+        Options = {"None", "1", "2", "3", "4"},
+        default = "None",
+        Default = "None",
+        callback = function(choice) setWeaponSlot(choice) end,
+    })
+    updateWeaponSlotVisibility()
+    autoSection:Textbox({pointer = "rue/tracker/role", placeholder = "Role", text = selectedRole, middle = true, reset_on_focus = false})
+    autoSection:Textbox({pointer = "rue/tracker/connected_port", placeholder = "Connected Port", text = "None", middle = true, reset_on_focus = false})
+    autoSection:Textbox({pointer = "rue/tracker/status", placeholder = "Status", text = statusText, middle = true, reset_on_focus = false})
+    autoSection:Textbox({pointer = "rue/tracker/vote", placeholder = "Vote", text = voteStatus, middle = true, reset_on_focus = false})
+    autoSection:Textbox({pointer = "rue/tracker/invincible", placeholder = "Invincible", text = invincibilityStatus, middle = true, reset_on_focus = false})
+    autoSection:Textbox({pointer = "rue/tracker/weapon_slot", placeholder = "Weapon Slot", text = selectedWeaponSlot, middle = true, reset_on_focus = false})
 end
 
 local settingsPage = window:Page({name = "Settings", side = "Left", size = 100})
 do
     local menuSection = settingsPage:Section({name = "Menu", side = "Left"})
-    do
-        menuSection:Keybind({
-            pointer = "rue/settings/menu_bind",
-            name = "Bind",
-            default = Enum.KeyCode.RightShift,
-            callback = function(key)
-                window.uibind = key
-            end,
-        })
-
-        menuSection:Toggle({
-            pointer = "rue/settings/watermark",
-            name = "Watermark",
-            default = true,
-            callback = function(state)
-                if window.watermark then
-                    window.watermark:Update("Visible", state)
-                end
-            end,
-        })
-
-        menuSection:Button({
-            name = "Unload",
-            confirmation = true,
-            callback = function()
-                monitorToken += 1
-                if activeMainTween then
-                    pcall(function()
-                        activeMainTween:Cancel()
-                    end)
-                end
-                window:Unload()
-            end,
-        })
-    end
+    menuSection:Keybind({pointer = "rue/settings/menu_bind", name = "Bind", default = Enum.KeyCode.RightShift, callback = function(key)
+        window.uibind = key
+    end})
+    menuSection:Toggle({pointer = "rue/settings/watermark", name = "Watermark", default = true, callback = function(state)
+        if window.watermark then window.watermark:Update("Visible", state) end
+    end})
+    menuSection:Button({name = "Unload", confirmation = true, callback = function()
+        monitorToken += 1
+        if activeMainTween then pcall(function() activeMainTween:Cancel() end) end
+        window:Unload()
+    end})
 
     local themeSection = settingsPage:Section({name = "Theme", side = "Right"})
-    do
-        themeSection:Dropdown({
-            Name = "Accent",
-            Options = {"Rue", "Mint", "Red", "Blue", "White"},
-            Default = "Rue",
-            Pointer = "rue/settings/accent",
-            callback = function(choice)
-                local colors = {
-                    Rue = Color3.fromRGB(175, 95, 255),
-                    Mint = Color3.fromRGB(0, 255, 139),
-                    Red = Color3.fromRGB(250, 47, 47),
-                    Blue = Color3.fromRGB(70, 140, 255),
-                    White = Color3.fromRGB(235, 235, 235),
-                }
-                library:UpdateColor("Accent", colors[choice] or colors.Rue)
-            end,
-        })
-
-        themeSection:Colorpicker({
-            pointer = "rue/settings/custom_accent",
-            name = "Custom Accent",
-            default = Color3.fromRGB(175, 95, 255),
-            callback = function(color)
-                library:UpdateColor("Accent", color)
-            end,
-        })
-    end
+    themeSection:Dropdown({
+        Name = "Accent",
+        Options = {"Rue", "Mint", "Red", "Blue", "White"},
+        Default = "Rue",
+        Pointer = "rue/settings/accent",
+        callback = function(choice)
+            local colors = {
+                Rue = Color3.fromRGB(175, 95, 255),
+                Mint = Color3.fromRGB(0, 255, 139),
+                Red = Color3.fromRGB(250, 47, 47),
+                Blue = Color3.fromRGB(70, 140, 255),
+                White = Color3.fromRGB(235, 235, 235),
+            }
+            library:UpdateColor("Accent", colors[choice] or colors.Rue)
+        end,
+    })
+    themeSection:Colorpicker({pointer = "rue/settings/custom_accent", name = "Custom Accent", default = Color3.fromRGB(175, 95, 255), callback = function(color)
+        library:UpdateColor("Accent", color)
+    end})
 end
 
 window.uibind = Enum.KeyCode.RightShift
