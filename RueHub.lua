@@ -438,10 +438,16 @@ tweenAltToMain = function()
     end
     if activeMainTween then pcall(function() activeMainTween:Cancel() end) end
     local frontPosition = mainRoot.Position + (mainRoot.CFrame.LookVector * 3)
-    altRoot.CFrame = CFrame.lookAt(frontPosition, mainRoot.Position)
-    statusText = "Alt placed in front of Main"
+    local targetCFrame = CFrame.lookAt(frontPosition, mainRoot.Position)
+    activeMainTween = TweenService:Create(
+        altRoot,
+        TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {CFrame = targetCFrame}
+    )
+    statusText = "Alt tweening in front of Main"
     updateTracker()
     notify(statusText)
+    activeMainTween:Play()
     return true
 end
 
