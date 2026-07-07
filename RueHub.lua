@@ -84,7 +84,6 @@ local currentTeamName = nil
 local activeMainTween = nil
 local monitorToken = 0
 local failPosition = Vector3.new(212, -682, 1184)
-local tweenToMainDuration = 3
 
 local ROLE_TO_TEAM = {Main = "Team1", Alt = "Team2"}
 local QUEUE_PAD_NAMES = {"Queue Pad #1", "Queue Pad #2"}
@@ -438,15 +437,11 @@ tweenAltToMain = function()
         return false
     end
     if activeMainTween then pcall(function() activeMainTween:Cancel() end) end
-    activeMainTween = TweenService:Create(
-        altRoot,
-        TweenInfo.new(tweenToMainDuration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-        {CFrame = mainRoot.CFrame * CFrame.new(0, 0, 4)}
-    )
-    statusText = "Alt tweening to Main"
+    local frontPosition = mainRoot.Position + (mainRoot.CFrame.LookVector * 3)
+    altRoot.CFrame = CFrame.lookAt(frontPosition, mainRoot.Position)
+    statusText = "Alt placed in front of Main"
     updateTracker()
     notify(statusText)
-    activeMainTween:Play()
     return true
 end
 
